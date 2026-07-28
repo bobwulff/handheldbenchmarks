@@ -264,6 +264,48 @@
     #play-btn { width: 52px; height: 52px; bottom: 20px; right: 20px; }
     #play-btn .btn-label { display: none; }
   }
+
+  /* ── Dataset selector ─────────────────────────────────────────────────────── */
+  .dataset-row {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 24px; flex-wrap: wrap;
+  }
+  .dataset-label {
+    font-family: 'Barlow Condensed', sans-serif;
+    font-size: 11px; font-weight: 700; letter-spacing: 3px;
+    text-transform: uppercase; color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .styled-select {
+    font-family: 'Barlow Condensed', sans-serif;
+    font-size: 13px; font-weight: 700; letter-spacing: 0.5px;
+    padding: 7px 32px 7px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b7280' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    min-width: 200px;
+    transition: border-color 0.18s;
+  }
+  .styled-select:focus { outline: none; }
+  #tab-windows .styled-select:focus,
+  #tab-windows .styled-select:hover { border-color: var(--win-accent); }
+  #tab-android .styled-select:focus,
+  #tab-android .styled-select:hover { border-color: var(--android-accent); }
+  .styled-select option { background: #1e222d; color: var(--text); }
+
+  /* grayed-out chips for devices not in current game */
+  .device-chip.unavailable {
+    opacity: 0.25;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
 </style>
 </head>
 <body>
@@ -310,6 +352,14 @@
 
   <!-- Windows Tab -->
   <div class="tab-content active" id="tab-windows">
+    <!-- Dataset selector -->
+    <div class="dataset-row" id="win-dataset-row">
+      <span class="dataset-label">Dataset</span>
+      <select class="styled-select" id="win-game-select" onchange="onDatasetChange('windows')">
+        <option value="__timespy__">Time Spy Average</option>
+      </select>
+      <select class="styled-select" id="win-metric-select" onchange="renderChart('windows')" style="display:none"></select>
+    </div>
     <div class="controls-row">
       <div class="control-group">
         <div class="section-label">Filter Devices</div>
@@ -329,6 +379,14 @@
 
   <!-- Android Tab -->
   <div class="tab-content" id="tab-android">
+    <!-- Dataset selector -->
+    <div class="dataset-row" id="android-dataset-row">
+      <span class="dataset-label">Dataset</span>
+      <select class="styled-select" id="android-game-select" onchange="onDatasetChange('android')">
+        <option value="__timespy__">Time Spy Average</option>
+      </select>
+      <select class="styled-select" id="android-metric-select" onchange="renderChart('android')" style="display:none"></select>
+    </div>
     <div class="controls-row">
       <div class="control-group">
         <div class="section-label">Filter Devices</div>
@@ -367,6 +425,8 @@ let winData = null, androidData = null;
 let winSelected      = new Set(), androidSelected      = new Set();
 let winHighlighted   = new Set(), androidHighlighted   = new Set();
 let currentPlatform  = 'windows';
+// Game FPS data: { gameName: { metrics: ['Avg FPS', ...], devices: { DevName: { 'Avg FPS': 32.1, ... } } } }
+let winGames = {}, androidGames = {};
 
 // ── Colors ──────────────────────────────────────────────────────────────────
 const WIN_COLORS = [
@@ -407,25 +467,37 @@ const HIGHLIGHT_COLOR = '#ff9f1c';
 
 // ── Fetch with proxy fallback ────────────────────────────────────────────────
 async function fetchCSV(url) {
+  // Ordered by reliability. corsproxy.io now blocks non-localhost, so it's last.
   const proxies = [
     u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+    u => 'https://cors.x2u.in/' + u,
     u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
+    u => 'https://proxy.cors.sh/' + u,
     u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
     u => u,
   ];
+
+  const errors = [];
   for (const make of proxies) {
     try {
+      const proxyUrl = make(url);
       const resp = await Promise.race([
-        fetch(make(url)),
-        new Promise((_, r) => setTimeout(() => r(new Error('timeout')), 8000))
+        fetch(proxyUrl),
+        new Promise((_, r) => setTimeout(() => r(new Error('timeout')), 10000))
       ]);
-      if (!resp.ok) continue;
+      if (!resp.ok) { errors.push(`${proxyUrl.split('/')[2]}: HTTP ${resp.status}`); continue; }
       const text = await resp.text();
-      if (!text || text.trim().startsWith('<') || text.trim().startsWith('{')) continue;
+      // Reject HTML responses (error pages) or empty
+      if (!text || text.trim().length < 10) { errors.push(`${proxyUrl.split('/')[2]}: empty`); continue; }
+      if (text.trim().startsWith('<')) { errors.push(`${proxyUrl.split('/')[2]}: got HTML`); continue; }
+      // Reject JSON wrapper responses that aren't raw CSV
+      if (text.trim().startsWith('{') && !text.includes(',')) { errors.push(`${proxyUrl.split('/')[2]}: got JSON`); continue; }
       return text;
-    } catch(e) { /* try next */ }
+    } catch(e) {
+      errors.push(`${make(url).split('/')[2]}: ${e.message}`);
+    }
   }
-  throw new Error('All fetch attempts failed.');
+  throw new Error('All proxies failed:\n' + errors.join('\n'));
 }
 
 // ── CSV parser ───────────────────────────────────────────────────────────────
@@ -444,41 +516,165 @@ function parseCSV(text) {
 }
 
 // ── Data parser ──────────────────────────────────────────────────────────────
+// ACTUAL sheet structure (confirmed from screenshot):
+//
+// TIME SPY SECTION (rows 1 to PC Game Anecdotal marker):
+//   Row 0:  DEVICE | OS/SoC | RAM | Android Ver | Test1 | Test2 | Test3 | Time Spy Average | ...
+//   Row 1+: DeviceName | OS | ... | score
+//   "NOT REALLY HANDHELDS" = section label row, skip label but include devices beneath
+//
+// GAME SECTION:
+//   GAME: row:   col0="GAME: Marvel Rivals" | col1="OS" | col2="Resolution" | col3="Highest Avg" | col4="Lowest" | ...
+//   Device rows: col0=DeviceName | col1=OS value | col2=Resolution value | col3=FPS | col4=FPS | ...
+//   Next GAME: row starts the next game
+//
+// KEY INSIGHT: metric names are IN THE GAME: ROW ITSELF (cols 3+), NOT in row 0!
 function parseData(rows) {
+  if (!rows || rows.length < 2) throw new Error('Not enough rows in CSV.');
   const header = rows[0].map(h => h.trim());
+
+  // ── Find Time Spy Average column in main header row 0 ─────────────────────
   let avgCol = -1;
   for (let c = 0; c < header.length; c++) {
     const h = header[c].toLowerCase();
     if (h.includes('time spy') && h.includes('average')) { avgCol = c; break; }
   }
-  if (avgCol === -1) for (let c = 0; c < header.length; c++) {
-    if (header[c].toLowerCase().includes('time spy')) { avgCol = c; break; }
+  if (avgCol === -1) {
+    for (let c = 0; c < header.length; c++) {
+      if (header[c].toLowerCase().includes('time spy')) { avgCol = c; break; }
+    }
   }
-  if (avgCol === -1) for (let c = 0; c < header.length; c++) {
-    if (header[c].toLowerCase().includes('average')) { avgCol = c; break; }
+
+  // ── Parse Time Spy entries ─────────────────────────────────────────────────
+  // Read all device rows until we hit a GAME: row or PC Game Anecdotal marker.
+  // Skip "NOT REALLY HANDHELDS" label row but include the devices beneath it.
+  const timespy = [];
+  if (avgCol !== -1) {
+    for (let r = 1; r < rows.length; r++) {
+      const row   = rows[r];
+      const label = (row[0] || '').trim();
+      if (!label) continue;
+      if (label.toUpperCase().startsWith('GAME:')) break;
+      if (label.toLowerCase().includes('pc game anecdotal') ||
+          label.toLowerCase().includes('no frame gen')) break;
+      if (label.toLowerCase().includes('not really')) continue; // section label, skip
+      const score = parseFloat((row[avgCol] || '').replace(/,/g, '').trim());
+      if (!isNaN(score) && score > 0) timespy.push({ name: label, score });
+    }
+    timespy.sort((a, b) => b.score - a.score);
   }
-  if (avgCol === -1) throw new Error('Could not find "Time Spy Average" column. Headers: ' + header.join(', '));
-  const entries = [];
+
+  // ── Parse GAME sections ────────────────────────────────────────────────────
+  // The GAME: row itself contains the column headers for that game:
+  //   col 0 = "GAME: Marvel Rivals (practice range)"
+  //   col 1 = "OS"            (header for OS column)
+  //   col 2 = "Resolution"    (header for resolution column — we skip its values)
+  //   col 3 = "Highsest Avg"  (first FPS metric)
+  //   col 4 = "Lowest"        (second FPS metric)
+  //   col 5 = "Performance Test" (third FPS metric, if present)
+  //
+  // Device rows immediately follow:
+  //   col 0 = "Steam Deck OLED"
+  //   col 1 = "SteamOS"
+  //   col 2 = "1280x800p (FSR, Performance)"
+  //   col 3 = 33
+  //   col 4 = 19
+  const games = {};
+  let currentGame     = null;
+  let gameMetricCols  = []; // [{name, col}] — set fresh for each GAME: row
+
   for (let r = 1; r < rows.length; r++) {
-    const row = rows[r];
-    const device = (row[0] || '').trim();
-    if (!device) continue;
-    const score = parseFloat((row[avgCol] || '').replace(/,/g, '').trim());
-    if (!isNaN(score) && score > 0) entries.push({ name: device, score });
+    const row   = rows[r];
+    const label = (row[0] || '').trim();
+    if (!label) continue;
+
+    if (label.toUpperCase().startsWith('GAME:')) {
+      // Extract game name
+      currentGame = label.replace(/^GAME:\s*/i, '').trim();
+
+      // Read metric column names from THIS row (cols after Resolution col)
+      // Find "Resolution" in this row first
+      gameMetricCols = [];
+      let resColInGame = -1;
+      for (let c = 1; c < row.length; c++) {
+        if ((row[c] || '').trim().toLowerCase().includes('resolution')) {
+          resColInGame = c; break;
+        }
+      }
+      if (resColInGame !== -1) {
+        // Metric cols are everything to the right of Resolution in this GAME: row
+        for (let c = resColInGame + 1; c < row.length; c++) {
+          const name = (row[c] || '').trim();
+          if (name) gameMetricCols.push({ name, col: c });
+        }
+      } else {
+        // No Resolution col found — grab cols 3+ as metrics (skip Device=0, OS=1, Resolution=2)
+        for (let c = 3; c < row.length; c++) {
+          const name = (row[c] || '').trim();
+          if (name) gameMetricCols.push({ name, col: c });
+        }
+      }
+
+      games[currentGame] = { metrics: gameMetricCols.map(m => m.name), devices: {} };
+      continue;
+    }
+
+    if (currentGame) {
+      // Skip non-device label rows
+      if (label.toLowerCase().includes('not really') ||
+          label.toLowerCase().includes('pc game') ||
+          label.toLowerCase().includes('no frame gen')) continue;
+
+      // Device row — col 0 = name, col 1 = OS
+      const baseName   = label;
+      const os         = (row[1] || '').trim();
+      const deviceName = os ? `${baseName} (${os})` : baseName;
+
+      // Debug: log every device row and what values we find
+      const debugVals = gameMetricCols.map(({name, col}) => `${name}[col${col}]="${row[col] || ''}"`);
+      console.log(`  [game row] "${deviceName}" | metricCols: ${debugVals.join(', ')} | full row:`, row.slice(0, 8));
+
+      gameMetricCols.forEach(({ name, col }) => {
+        const raw = (row[col] || '').replace(/,/g, '').trim();
+        const val = parseFloat(raw);
+        if (!isNaN(val) && val > 0) {
+          if (!games[currentGame].devices[deviceName]) games[currentGame].devices[deviceName] = {};
+          games[currentGame].devices[deviceName][name] = val;
+        }
+      });
+    }
   }
-  if (entries.length === 0) throw new Error('No valid data rows found.');
-  entries.sort((a, b) => b.score - a.score);
-  return entries;
+
+  // Debug output
+  console.log('[parseData] Time Spy entries:', timespy.length);
+  console.log('[parseData] Games:', Object.keys(games));
+  Object.entries(games).forEach(([g, d]) => {
+    console.log(`  "${g}": metrics=[${d.metrics.join(', ')}], devices=${Object.keys(d.devices).length}`);
+  });
+
+  if (timespy.length === 0 && Object.keys(games).length === 0) {
+    throw new Error('No data found. Row 0 headers: ' + header.slice(0, 12).join(' | '));
+  }
+
+  return { timespy, games };
 }
 
 // ── Chips ─────────────────────────────────────────────────────────────────────
-function renderChips(platform) {
-  const data        = platform === 'windows' ? winData : androidData;
+// In Time Spy mode: chips come from winData/androidData (Time Spy device list)
+// In Game mode: chips come from gameData.devices (includes "Device (OS)" names)
+function renderChips(platform, gameData = null) {
+  const tsData      = platform === 'windows' ? winData        : androidData;
   const selected    = platform === 'windows' ? winSelected    : androidSelected;
   const highlighted = platform === 'windows' ? winHighlighted : androidHighlighted;
   const el          = document.getElementById(platform === 'windows' ? 'win-chips' : 'android-chips');
   el.innerHTML      = '';
-  data.forEach(({ name }) => {
+
+  // Determine which device list to show
+  const deviceList = gameData
+    ? Object.keys(gameData.devices).sort()   // game mode: use game's device list
+    : tsData.map(d => d.name);               // time spy mode: use time spy list
+
+  deviceList.forEach(name => {
     const chip = document.createElement('button');
     let cls = 'device-chip';
     if (selected.has(name))    cls += ' active';
@@ -489,45 +685,63 @@ function renderChips(platform) {
     chip.onclick = (e) => {
       e.preventDefault();
       selected.has(name) ? selected.delete(name) : selected.add(name);
-      renderChips(platform); renderChart(platform);
+      renderChips(platform, gameData); renderChart(platform);
     };
     chip.oncontextmenu = (e) => {
       e.preventDefault();
       if (!highlighted.has(name)) { highlighted.add(name); selected.add(name); }
       else { highlighted.delete(name); }
-      renderChips(platform); renderChart(platform);
+      renderChips(platform, gameData); renderChart(platform);
     };
     el.appendChild(chip);
   });
 }
 
 function selectAll(p) {
-  const data = p === 'windows' ? winData : androidData;
-  const sel  = p === 'windows' ? winSelected : androidSelected;
-  data.forEach(({ name }) => sel.add(name));
-  renderChips(p); renderChart(p);
+  const gamesSel = document.getElementById(p === 'windows' ? 'win-game-select' : 'android-game-select');
+  const games    = p === 'windows' ? winGames : androidGames;
+  const sel      = p === 'windows' ? winSelected : androidSelected;
+  const selectedGame = gamesSel ? gamesSel.value : '__timespy__';
+
+  if (selectedGame !== '__timespy__' && games[selectedGame]) {
+    Object.keys(games[selectedGame].devices).forEach(n => sel.add(n));
+    renderChips(p, games[selectedGame]); renderChart(p);
+  } else {
+    const data = p === 'windows' ? winData : androidData;
+    data.forEach(({ name }) => sel.add(name));
+    renderChips(p); renderChart(p);
+  }
 }
 function selectNone(p) {
   (p === 'windows' ? winSelected : androidSelected).clear();
-  renderChips(p); renderChart(p);
+  const gamesSel = document.getElementById(p === 'windows' ? 'win-game-select' : 'android-game-select');
+  const games    = p === 'windows' ? winGames : androidGames;
+  const selectedGame = gamesSel ? gamesSel.value : '__timespy__';
+  const gameData = selectedGame !== '__timespy__' ? games[selectedGame] : null;
+  renderChips(p, gameData); renderChart(p);
 }
 function clearHighlights(p) {
   (p === 'windows' ? winHighlighted : androidHighlighted).clear();
-  renderChips(p); renderChart(p);
+  const gamesSel = document.getElementById(p === 'windows' ? 'win-game-select' : 'android-game-select');
+  const games    = p === 'windows' ? winGames : androidGames;
+  const selectedGame = gamesSel ? gamesSel.value : '__timespy__';
+  const gameData = selectedGame !== '__timespy__' ? games[selectedGame] : null;
+  renderChips(p, gameData); renderChart(p);
 }
 
 // ── Number counter animation ─────────────────────────────────────────────────
 function animateCounters(panel, duration = 950) {
   panel.querySelectorAll('.bar-value[data-target]').forEach(el => {
-    const target  = parseFloat(el.dataset.target);
-    const start   = performance.now();
+    const target   = parseFloat(el.dataset.target);
+    const decimals = parseInt(el.dataset.decimal || '0', 10);
+    const start    = performance.now();
     function tick(now) {
-      const t = Math.min((now - start) / duration, 1);
-      // same easing as the bar: cubic-bezier(0.16, 1, 0.3, 1) approximated
+      const t    = Math.min((now - start) / duration, 1);
       const ease = 1 - Math.pow(1 - t, 3);
-      el.textContent = Math.round(ease * target).toLocaleString();
+      const val  = ease * target;
+      el.textContent = decimals > 0 ? val.toFixed(decimals) : Math.round(val).toLocaleString();
       if (t < 1) requestAnimationFrame(tick);
-      else el.textContent = Math.round(target).toLocaleString();
+      else el.textContent = decimals > 0 ? target.toFixed(decimals) : Math.round(target).toLocaleString();
     }
     requestAnimationFrame(tick);
   });
@@ -535,13 +749,84 @@ function animateCounters(panel, duration = 950) {
 
 // ── Chart ─────────────────────────────────────────────────────────────────────
 function renderChart(platform, animate = false) {
-  const data        = platform === 'windows' ? winData        : androidData;
+  // Check if we are in game mode
+  const gamesSel    = document.getElementById(platform === 'windows' ? 'win-game-select'   : 'android-game-select');
+  const metricSel   = document.getElementById(platform === 'windows' ? 'win-metric-select' : 'android-metric-select');
+  const games       = platform === 'windows' ? winGames : androidGames;
+  const selectedGame = gamesSel ? gamesSel.value : '__timespy__';
+  const isGameMode  = selectedGame !== '__timespy__';
+
+  const allData     = platform === 'windows' ? winData        : androidData;
   const selected    = platform === 'windows' ? winSelected    : androidSelected;
   const highlighted = platform === 'windows' ? winHighlighted : androidHighlighted;
   const panel       = document.getElementById(platform === 'windows' ? 'win-chart-panel' : 'android-chart-panel');
   const colors      = platform === 'windows' ? WIN_COLORS     : ANDROID_COLORS;
 
-  const visible = data.filter(d => selected.has(d.name));
+  if (isGameMode) {
+    // ── Game FPS mode ─────────────────────────────────────────────────────────
+    const gameData   = games[selectedGame];
+    const metricName = metricSel && metricSel.style.display !== 'none' && metricSel.value
+      ? metricSel.value
+      : (gameData ? gameData.metrics[0] : null);
+
+    if (!gameData || !metricName) {
+      panel.innerHTML = `<div class="status-msg">No game data available.</div>`;
+      return;
+    }
+
+    // Build entries: devices that have data for this metric AND are selected
+    let entries = Object.entries(gameData.devices)
+      .filter(([dev]) => selected.has(dev))
+      .map(([dev, metrics]) => ({ name: dev, score: metrics[metricName] }))
+      .filter(e => e.score != null && !isNaN(e.score))
+      .sort((a, b) => b.score - a.score);
+
+    if (entries.length === 0) {
+      panel.innerHTML = `<div class="status-msg">No data for selected devices.</div>`;
+      return;
+    }
+
+    const anyHL    = entries.some(d => highlighted.has(d.name));
+    const maxScore = Math.max(...entries.map(d => d.score), 1);
+    const isHigherBetter = !metricName.toLowerCase().includes('low') && !metricName.toLowerCase().includes('min');
+
+    let html = `
+      <div class="chart-heading">${esc(selectedGame)}</div>
+      <div class="chart-subheading">${esc(metricName)} &nbsp;·&nbsp; ${isHigherBetter ? 'Higher' : 'Higher'} is better &nbsp;·&nbsp; Sorted high to low${anyHL ? ' &nbsp;·&nbsp; <span style="color:var(--highlight)">★ Highlighted</span>' : ''}</div>
+    `;
+
+    entries.forEach(({ name, score }, i) => {
+      const pct      = (score / maxScore) * 100;
+      const isHL     = highlighted.has(name);
+      const color    = isHL ? HIGHLIGHT_COLOR : colors[i % colors.length];
+      const rowClass = anyHL ? (isHL ? 'bar-row is-highlighted' : 'bar-row dimmed') : 'bar-row';
+      const barGrad  = isHL
+        ? `linear-gradient(90deg, ${HIGHLIGHT_COLOR}88, ${HIGHLIGHT_COLOR})`
+        : `linear-gradient(90deg, ${color}77, ${color})`;
+      const delay    = animate ? i * 45 : 0;
+      const initVal  = animate ? '0' : score.toFixed(1);
+
+      html += `
+        <div class="${rowClass}" style="animation-delay:${delay}ms">
+          <div class="bar-label" title="${esc(name)}">${isHL ? '★ ' : ''}${esc(name)}</div>
+          <div class="bar-track">
+            <div class="bar-fill" data-pct="${pct}" style="background:${barGrad}">
+              <span class="bar-value" data-target="${score}" data-decimal="1">${initVal}</span>
+            </div>
+          </div>
+        </div>`;
+    });
+
+    panel.innerHTML = html;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      panel.querySelectorAll('.bar-fill').forEach(el => { el.style.width = el.dataset.pct + '%'; });
+      if (animate) animateCounters(panel);
+    }));
+    return;
+  }
+
+  // ── Time Spy mode ──────────────────────────────────────────────────────────
+  const visible = allData.filter(d => selected.has(d.name));
   if (visible.length === 0) {
     panel.innerHTML = `<div class="status-msg">Select at least one device above.</div>`;
     return;
@@ -564,7 +849,6 @@ function renderChart(platform, animate = false) {
       ? `linear-gradient(90deg, ${HIGHLIGHT_COLOR}88, ${HIGHLIGHT_COLOR})`
       : `linear-gradient(90deg, ${color}77, ${color})`;
     const delay    = animate ? i * 45 : 0;
-    // Start counter at 0 if animating, else show final value immediately
     const initVal  = animate ? '0' : Math.round(score).toLocaleString();
 
     html += `
@@ -579,8 +863,6 @@ function renderChart(platform, animate = false) {
   });
 
   panel.innerHTML = html;
-
-  // Trigger bar grow + counter animate
   requestAnimationFrame(() => requestAnimationFrame(() => {
     panel.querySelectorAll('.bar-fill').forEach(el => { el.style.width = el.dataset.pct + '%'; });
     if (animate) animateCounters(panel);
@@ -647,19 +929,76 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// ── Populate game dropdown ────────────────────────────────────────────────────
+function populateGameDropdown(platform, games) {
+  const sel = document.getElementById(platform === 'windows' ? 'win-game-select' : 'android-game-select');
+  // Remove any existing game options (keep first = Time Spy)
+  while (sel.options.length > 1) sel.remove(1);
+  Object.keys(games).forEach(gameName => {
+    const opt = document.createElement('option');
+    opt.value = gameName;
+    opt.textContent = gameName;
+    sel.appendChild(opt);
+  });
+}
+
+// ── Dataset change handler ────────────────────────────────────────────────────
+function onDatasetChange(platform) {
+  const gamesSel   = document.getElementById(platform === 'windows' ? 'win-game-select'   : 'android-game-select');
+  const metricSel  = document.getElementById(platform === 'windows' ? 'win-metric-select' : 'android-metric-select');
+  const games      = platform === 'windows' ? winGames : androidGames;
+  const data       = platform === 'windows' ? winData  : androidData;
+  const selected   = platform === 'windows' ? winSelected : androidSelected;
+  const selectedGame = gamesSel.value;
+
+  if (selectedGame === '__timespy__') {
+    metricSel.style.display = 'none';
+    // Restore time spy device selection
+    selected.clear();
+    const tsData = platform === 'windows' ? winData : androidData;
+    tsData.forEach(({ name }) => selected.add(name));
+    renderChips(platform, null);
+    renderChart(platform);
+    return;
+  }
+
+  // Populate metric dropdown for this game
+  const gameData = games[selectedGame];
+  metricSel.innerHTML = '';
+  (gameData ? gameData.metrics : []).forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m; opt.textContent = m;
+    metricSel.appendChild(opt);
+  });
+  metricSel.style.display = gameData && gameData.metrics.length > 1 ? '' : 'none';
+
+  // Select all devices for this game by default
+  selected.clear();
+  if (gameData) Object.keys(gameData.devices).forEach(n => selected.add(n));
+
+  renderChips(platform, gameData || null);
+  renderChart(platform);
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
   try {
-    const text = await fetchCSV(WIN_URL);
-    winData = parseData(parseCSV(text));
+    const text   = await fetchCSV(WIN_URL);
+    const parsed = parseData(parseCSV(text));
+    winData  = parsed.timespy;
+    winGames = parsed.games;
     winData.forEach(({ name }) => winSelected.add(name));
+    populateGameDropdown('windows', winGames);
     renderChips('windows'); renderChart('windows');
   } catch(e) { console.error('Windows:', e); showError('win-loading', e.message); }
 
   try {
-    const text = await fetchCSV(ANDROID_URL);
-    androidData = parseData(parseCSV(text));
+    const text   = await fetchCSV(ANDROID_URL);
+    const parsed = parseData(parseCSV(text));
+    androidData  = parsed.timespy;
+    androidGames = parsed.games;
     androidData.forEach(({ name }) => androidSelected.add(name));
+    populateGameDropdown('android', androidGames);
     renderChips('android'); renderChart('android');
   } catch(e) { console.error('Android:', e); showError('android-loading', e.message); }
 }
