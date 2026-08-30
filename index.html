@@ -30,14 +30,48 @@
   }
   body::before { display: none; }
 
-  /* ── Film grain ─────────────────────────────────────────────────────────── */
-  #grain {
+  /* ── Film grain (CSS-only, GPU-composited, zero CPU) ────────────────────── */
+  /* Uses a tiny inline SVG noise pattern tiled and animated via background-position */
+  body::after {
+    content: '';
     position: fixed; inset: 0; z-index: 9999;
-    pointer-events: none; opacity: 0.055; will-change: transform;
+    pointer-events: none;
+    opacity: 0.07;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+    background-size: 256px 256px;
+    animation: grainShift 0.12s steps(1) infinite;
+    will-change: background-position;
+  }
+  @keyframes grainShift {
+    0%   { background-position:   0px   0px; }
+    10%  { background-position: -64px -32px; }
+    20%  { background-position: -128px  16px; }
+    30%  { background-position:  32px -64px; }
+    40%  { background-position: -96px  48px; }
+    50%  { background-position:  48px -16px; }
+    60%  { background-position: -32px  96px; }
+    70%  { background-position: -160px -48px; }
+    80%  { background-position:  16px  64px; }
+    90%  { background-position: -80px -96px; }
+    100% { background-position:   0px   0px; }
   }
 
-  /* ── Bloom wrap ──────────────────────────────────────────────────────────── */
-  .bloom-wrap { filter: url(#bloom-filter); }
+  /* ── Bloom / pro-mist (lightweight CSS, GPU-native, Safari-safe) ─────────── */
+  /* brightness+contrast lift blacks slightly; blur on a pseudo creates the glow */
+  .bloom-wrap {
+    filter: brightness(1.04) contrast(0.96);
+  }
+  /* Glow layer: a fixed pseudo behind everything using a CSS blur */
+  .bloom-wrap::before {
+    content: '';
+    position: fixed; inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background: inherit;
+    filter: blur(18px) brightness(0.35);
+    opacity: 0.55;
+    mix-blend-mode: screen;
+  }
 
   .wrapper {
     position: relative; z-index: 1;
@@ -148,6 +182,8 @@
     opacity: 0; transform: translateX(-12px);
     animation: rowIn 0.4s ease forwards;
     transition: opacity 0.2s;
+    contain: layout style;
+    will-change: opacity, transform;
   }
   @keyframes rowIn { to { opacity: 1; transform: translateX(0); } }
 
@@ -177,6 +213,8 @@
     width: 0%;
     transition: width 1s cubic-bezier(0.16, 1, 0.3, 1);
     position: relative;
+    will-change: width;
+    transform: translateZ(0);
     /* clip the colored bar itself but not its children */
     overflow: visible;
   }
@@ -310,32 +348,9 @@
 </head>
 <body>
 
-<!-- ── Hidden SVG bloom filter ─────────────────────────────────────────────── -->
-<svg width="0" height="0" style="position:absolute">
-  <defs>
-    <filter id="bloom-filter" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
-      <feColorMatrix type="saturate" values="1.07" result="sat"/>
-      <feGaussianBlur in="sat" stdDeviation="3.5" result="blur1"/>
-      <feGaussianBlur in="sat" stdDeviation="9"   result="blur2"/>
-      <feBlend in="blur1" in2="blur2" mode="screen" result="blended"/>
-      <feComposite in="blended" in2="blended" operator="arithmetic" k1="0" k2="0.5" k3="0" k4="0" result="halfBloom"/>
-      <feBlend in="sat" in2="halfBloom" mode="screen" result="bloomed"/>
-      <feColorMatrix in="bloomed" type="matrix"
-        values="1.02 0.005 0.005 0 0.009
-                0.005 1.02 0.005 0 0.009
-                0.005 0.005 1.02 0 0.009
-                0 0 0 1 0" result="final"/>
-      <feComponentTransfer in="final">
-        <feFuncR type="linear" slope="0.965" intercept="0.0125"/>
-        <feFuncG type="linear" slope="0.965" intercept="0.0125"/>
-        <feFuncB type="linear" slope="0.965" intercept="0.0125"/>
-      </feComponentTransfer>
-    </filter>
-  </defs>
-</svg>
+<!-- bloom is now pure CSS -->
 
-<!-- ── Animated film grain ───────────────────────────────────────────────────── -->
-<canvas id="grain"></canvas>
+<!-- grain is now pure CSS, no canvas needed -->
 
 <div class="bloom-wrap">
 <div class="wrapper">
@@ -427,6 +442,7 @@ let winHighlighted   = new Set(), androidHighlighted   = new Set();
 let currentPlatform  = 'windows';
 // Game FPS data: { gameName: { metrics: ['Avg FPS', ...], devices: { DevName: { 'Avg FPS': 32.1, ... } } } }
 let winGames = {}, androidGames = {};
+let winNotReally = new Set(), androidNotReally = new Set();
 
 // ── Colors ──────────────────────────────────────────────────────────────────
 const WIN_COLORS = [
@@ -441,29 +457,7 @@ const ANDROID_COLORS = [
 ];
 const HIGHLIGHT_COLOR = '#ff9f1c';
 
-// ── Film grain ───────────────────────────────────────────────────────────────
-(function initGrain() {
-  const canvas = document.getElementById('grain');
-  const ctx    = canvas.getContext('2d');
-  let w, h, frame = 0;
-  function resize() { w = canvas.width = window.innerWidth; h = canvas.height = window.innerHeight; }
-  window.addEventListener('resize', resize);
-  resize();
-  function drawGrain() {
-    frame++;
-    if (frame % 2 === 0) {
-      const img = ctx.createImageData(w, h);
-      const d   = img.data;
-      for (let i = 0; i < d.length; i += 4) {
-        const v = (Math.random() * 255) | 0;
-        d[i] = d[i+1] = d[i+2] = v; d[i+3] = 255;
-      }
-      ctx.putImageData(img, 0, 0);
-    }
-    requestAnimationFrame(drawGrain);
-  }
-  drawGrain();
-})();
+// Film grain is now CSS-only (see body::after in styles)
 
 // ── Fetch with proxy fallback ────────────────────────────────────────────────
 async function fetchCSV(url) {
@@ -547,8 +541,10 @@ function parseData(rows) {
 
   // ── Parse Time Spy entries ─────────────────────────────────────────────────
   // Read all device rows until we hit a GAME: row or PC Game Anecdotal marker.
-  // Skip "NOT REALLY HANDHELDS" label row but include the devices beneath it.
+  // Track which devices appear under "NOT REALLY HANDHELDS" so we can deselect them by default.
   const timespy = [];
+  const notReallyHandhelds = new Set();
+  let inNotReally = false;
   if (avgCol !== -1) {
     for (let r = 1; r < rows.length; r++) {
       const row   = rows[r];
@@ -557,9 +553,15 @@ function parseData(rows) {
       if (label.toUpperCase().startsWith('GAME:')) break;
       if (label.toLowerCase().includes('pc game anecdotal') ||
           label.toLowerCase().includes('no frame gen')) break;
-      if (label.toLowerCase().includes('not really')) continue; // section label, skip
+      if (label.toLowerCase().includes('not really')) {
+        inNotReally = true; // everything after this is "not really a handheld"
+        continue;
+      }
       const score = parseFloat((row[avgCol] || '').replace(/,/g, '').trim());
-      if (!isNaN(score) && score > 0) timespy.push({ name: label, score });
+      if (!isNaN(score) && score > 0) {
+        timespy.push({ name: label, score });
+        if (inNotReally) notReallyHandhelds.add(label);
+      }
     }
     timespy.sort((a, b) => b.score - a.score);
   }
@@ -656,7 +658,7 @@ function parseData(rows) {
     throw new Error('No data found. Row 0 headers: ' + header.slice(0, 12).join(' | '));
   }
 
-  return { timespy, games };
+  return { timespy, games, notReallyHandhelds };
 }
 
 // ── Chips ─────────────────────────────────────────────────────────────────────
@@ -987,7 +989,10 @@ async function init() {
     const parsed = parseData(parseCSV(text));
     winData  = parsed.timespy;
     winGames = parsed.games;
-    winData.forEach(({ name }) => winSelected.add(name));
+    winNotReally = parsed.notReallyHandhelds || new Set();
+    winData.forEach(({ name }) => {
+      if (!winNotReally.has(name)) winSelected.add(name);
+    });
     populateGameDropdown('windows', winGames);
     renderChips('windows'); renderChart('windows');
   } catch(e) { console.error('Windows:', e); showError('win-loading', e.message); }
@@ -997,7 +1002,10 @@ async function init() {
     const parsed = parseData(parseCSV(text));
     androidData  = parsed.timespy;
     androidGames = parsed.games;
-    androidData.forEach(({ name }) => androidSelected.add(name));
+    androidNotReally = parsed.notReallyHandhelds || new Set();
+    androidData.forEach(({ name }) => {
+      if (!androidNotReally.has(name)) androidSelected.add(name);
+    });
     populateGameDropdown('android', androidGames);
     renderChips('android'); renderChart('android');
   } catch(e) { console.error('Android:', e); showError('android-loading', e.message); }
