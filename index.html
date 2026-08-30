@@ -47,8 +47,8 @@
   #bloom-overlay {
     position: fixed; inset: 0; z-index: 9998;
     pointer-events: none;
-    backdrop-filter: blur(18px) brightness(1.5);
-    -webkit-backdrop-filter: blur(18px) brightness(1.5);
+    backdrop-filter: blur(18px) brightness(2);
+    -webkit-backdrop-filter: blur(18px) brightness(2);
     opacity: 0.22;
     mix-blend-mode: screen;
   }
@@ -451,7 +451,7 @@ const HIGHLIGHT_COLOR = '#ff9f1c';
   const INTERVAL = 1000 / FPS;
 
   // Render at half resolution and CSS-scale up — saves ~75% of pixel writes
-  const SCALE = 0.5;
+  const SCALE = 0.75;
 
   function resize() {
     w = canvas.width  = Math.floor(window.innerWidth  * SCALE);
